@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'emotion_detector.dart';
+import 'note_storage.dart';
+import 'emotion_analysis_widget.dart';
 
 // Global emotion detector instance
 final emotionDetector = EmotionDetector();
@@ -42,22 +44,6 @@ void main() async {
   runApp(const MyApp());
 }
 
-class Note {
-  final String id;
-  final String title;
-  final String content;
-  final DateTime createdAt;
-  final List<Map<String, dynamic>>? emotionAnalysis;
-
-  Note({
-    required this.id,
-    required this.title,
-    required this.content,
-    required this.createdAt,
-    this.emotionAnalysis,
-  });
-}
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -83,6 +69,23 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   final List<Note> _notes = [];
+  final NoteStorage _storage = NoteStorage();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadNotes();
+  }
+
+  Future<void> _loadNotes() async {
+    final notes = await _storage.loadNotes();
+    if (mounted) {
+      setState(() {
+        _notes.clear();
+        _notes.addAll(notes);
+      });
+    }
+  }
 
   void _createNote() async {
     final result = await Navigator.push(
@@ -132,8 +135,9 @@ class _MainScreenState extends State<MainScreen> {
       );
 
       if (mounted) {
+        await _storage.addNote(note, _notes);
         setState(() {
-          _notes.add(note);
+          // Notes already added in addNote method
         });
       }
     }
@@ -184,28 +188,143 @@ class HistoryScreen extends StatelessWidget {
       ),
       body: notes.isEmpty
           ? const Center(child: Text('No notes yet. Create your first note!'))
-          : ListView.builder(
-              itemCount: notes.length,
-              itemBuilder: (context, index) {
-                final note = notes[index];
-                return ListTile(
-                  leading: const Icon(Icons.note),
-                  title: Text(note.title),
-                  subtitle: Text(
-                    '${note.createdAt.day}/${note.createdAt.month}/${note.createdAt.year} ${note.createdAt.hour}:${note.createdAt.minute.toString().padLeft(2, '0')}',
+          : SingleChildScrollView(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: EmotionAnalysisWidget(notes: notes),
                   ),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => ViewNoteScreen(note: note),
-                      ),
-                    );
-                  },
-                );
-              },
+                  ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: notes.length,
+                    itemBuilder: (context, index) {
+                      final note = notes[index];
+
+                      // Get dominant emotion for preview
+                      String? dominantEmotion;
+                      if (note.emotionAnalysis != null &&
+                          note.emotionAnalysis!.isNotEmpty) {
+                        Map<String, int> emotionCounts = {};
+                        for (var analysis in note.emotionAnalysis!) {
+                          final emotion =
+                              analysis['emotion'] as Map<String, dynamic>;
+                          final label = emotion['label'] as String;
+                          emotionCounts[label] =
+                              (emotionCounts[label] ?? 0) + 1;
+                        }
+                        dominantEmotion = emotionCounts.entries
+                            .reduce((a, b) => a.value > b.value ? a : b)
+                            .key;
+                      }
+
+                      return ListTile(
+                        leading: dominantEmotion != null
+                            ? Icon(
+                                _getEmotionIcon(dominantEmotion),
+                                color: _getEmotionColor(dominantEmotion),
+                              )
+                            : const Icon(Icons.note),
+                        title: Text(note.title),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${note.createdAt.day}/${note.createdAt.month}/${note.createdAt.year} ${note.createdAt.hour}:${note.createdAt.minute.toString().padLeft(2, '0')}',
+                            ),
+                            if (dominantEmotion != null)
+                              Text(
+                                'Mood: $dominantEmotion',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: _getEmotionColor(dominantEmotion),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                          ],
+                        ),
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ViewNoteScreen(note: note),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
     );
+  }
+
+  Color _getEmotionColor(String emotion) {
+    switch (emotion.toLowerCase()) {
+      case 'sadness':
+        return Colors.blue.shade600;
+      case 'anger':
+        return Colors.red.shade600;
+      case 'love':
+        return Colors.pink.shade400;
+      case 'surprise':
+        return Colors.orange.shade600;
+      case 'fear':
+        return Colors.purple.shade600;
+      case 'happiness':
+        return Colors.yellow.shade700;
+      case 'neutral':
+        return Colors.grey.shade600;
+      case 'disgust':
+        return Colors.green.shade700;
+      case 'shame':
+        return Colors.brown.shade600;
+      case 'guilt':
+        return Colors.deepOrange.shade700;
+      case 'confusion':
+        return Colors.teal.shade600;
+      case 'desire':
+        return Colors.pinkAccent.shade400;
+      case 'sarcasm':
+        return Colors.indigo.shade600;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  IconData _getEmotionIcon(String emotion) {
+    switch (emotion.toLowerCase()) {
+      case 'sadness':
+        return Icons.sentiment_very_dissatisfied;
+      case 'anger':
+        return Icons.sentiment_very_dissatisfied;
+      case 'love':
+        return Icons.favorite;
+      case 'surprise':
+        return Icons.sentiment_satisfied;
+      case 'fear':
+        return Icons.warning;
+      case 'happiness':
+        return Icons.sentiment_very_satisfied;
+      case 'neutral':
+        return Icons.sentiment_neutral;
+      case 'disgust':
+        return Icons.sick;
+      case 'shame':
+        return Icons.face;
+      case 'guilt':
+        return Icons.psychology;
+      case 'confusion':
+        return Icons.help_outline;
+      case 'desire':
+        return Icons.favorite_border;
+      case 'sarcasm':
+        return Icons.chat_bubble_outline;
+      default:
+        return Icons.mood;
+    }
   }
 }
 
