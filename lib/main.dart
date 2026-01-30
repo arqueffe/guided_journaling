@@ -211,12 +211,29 @@ class HistoryScreen extends StatelessWidget {
                           final emotion =
                               analysis['emotion'] as Map<String, dynamic>;
                           final label = emotion['label'] as String;
-                          emotionCounts[label] =
-                              (emotionCounts[label] ?? 0) + 1;
+                          final score = emotion['score'] as double;
+                          // Only consider emotions with confidence >= 60%
+                          if (score >= 0.6) {
+                            emotionCounts[label] =
+                                (emotionCounts[label] ?? 0) + 1;
+                          }
                         }
-                        dominantEmotion = emotionCounts.entries
-                            .reduce((a, b) => a.value > b.value ? a : b)
-                            .key;
+                        // Sort by count and skip neutral if it's the top emotion
+                        final sortedEmotions = emotionCounts.entries.toList()
+                          ..sort((a, b) => b.value.compareTo(a.value));
+
+                        if (sortedEmotions.isNotEmpty) {
+                          // Use the top emotion if it's not neutral, otherwise use the second
+                          if (sortedEmotions[0].key.toLowerCase() !=
+                              'neutral') {
+                            dominantEmotion = sortedEmotions[0].key;
+                          } else if (sortedEmotions.length > 1) {
+                            dominantEmotion = sortedEmotions[1].key;
+                          } else {
+                            // Only neutral exists, still use it for display
+                            dominantEmotion = sortedEmotions[0].key;
+                          }
+                        }
                       }
 
                       return ListTile(
@@ -448,83 +465,94 @@ class ViewNoteScreen extends StatelessWidget {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: const Text('View Note'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              note.title,
-              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${note.createdAt.day}/${note.createdAt.month}/${note.createdAt.year} ${note.createdAt.hour}:${note.createdAt.minute.toString().padLeft(2, '0')}',
-              style: TextStyle(color: Colors.grey[600], fontSize: 14),
-            ),
-            const Divider(height: 24),
-            if (note.emotionAnalysis != null &&
-                note.emotionAnalysis!.isNotEmpty)
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Wrap(
-                    children: note.emotionAnalysis!.map((analysis) {
-                      final sentence = analysis['sentence'] as String;
-                      final emotion =
-                          analysis['emotion'] as Map<String, dynamic>;
-                      final label = emotion['label'] as String;
-                      final score = emotion['score'] as double;
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                note.title,
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${note.createdAt.day}/${note.createdAt.month}/${note.createdAt.year} ${note.createdAt.hour}:${note.createdAt.minute.toString().padLeft(2, '0')}',
+                style: TextStyle(color: Colors.grey[600], fontSize: 14),
+              ),
+              const Divider(height: 24),
+              if (note.emotionAnalysis != null &&
+                  note.emotionAnalysis!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16.0),
+                  child: EmotionAnalysisWidget(notes: [note]),
+                ),
+              if (note.emotionAnalysis != null &&
+                  note.emotionAnalysis!.isNotEmpty)
+                Wrap(
+                  children: note.emotionAnalysis!.map((analysis) {
+                    final sentence = analysis['sentence'] as String;
+                    final emotion = analysis['emotion'] as Map<String, dynamic>;
+                    final label = emotion['label'] as String;
+                    final score = emotion['score'] as double;
 
-                      return Tooltip(
-                        message:
-                            '$label (${(score * 100).toStringAsFixed(1)}%)',
-                        decoration: BoxDecoration(
-                          color: _getEmotionColor(label),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        textStyle: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        child: MouseRegion(
-                          cursor: SystemMouseCursors.help,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              border: Border(
-                                bottom: BorderSide(
-                                  color: _getEmotionColor(
-                                    label,
-                                  ).withOpacity(0.3),
-                                  width: 2,
-                                ),
+                    // Check if confidence is below 60%
+                    final isLowConfidence = score < 0.6;
+                    final displayLabel = isLowConfidence ? 'Unknown' : label;
+                    final displayColor = isLowConfidence
+                        ? Colors.grey.shade400
+                        : _getEmotionColor(label);
+
+                    return Tooltip(
+                      message: isLowConfidence
+                          ? 'Unknown (low confidence: ${(score * 100).toStringAsFixed(1)}%)'
+                          : '$label (${(score * 100).toStringAsFixed(1)}%)',
+                      decoration: BoxDecoration(
+                        color: displayColor,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      textStyle: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.help,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border(
+                              bottom: BorderSide(
+                                color: displayColor.withOpacity(0.3),
+                                width: 2,
                               ),
                             ),
-                            child: Text(
-                              sentence,
-                              style: const TextStyle(fontSize: 16, height: 1.5),
+                          ),
+                          child: Text(
+                            sentence,
+                            style: TextStyle(
+                              fontSize: 16,
+                              height: 1.5,
+                              color: isLowConfidence
+                                  ? Colors.grey.shade600
+                                  : null,
                             ),
                           ),
                         ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              )
-            else
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Text(
-                    note.content,
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ),
-              ),
-          ],
+                      ),
+                    );
+                  }).toList(),
+                )
+              else
+                Text(note.content, style: const TextStyle(fontSize: 16)),
+            ],
+          ),
         ),
       ),
     );

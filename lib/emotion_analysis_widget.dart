@@ -14,7 +14,11 @@ class EmotionAnalysisWidget extends StatelessWidget {
         for (var analysis in note.emotionAnalysis!) {
           final emotion = analysis['emotion'] as Map<String, dynamic>;
           final label = emotion['label'] as String;
-          emotionCounts[label] = (emotionCounts[label] ?? 0) + 1;
+          final score = emotion['score'] as double;
+          // Only consider emotions with confidence >= 60%
+          if (score >= 0.6) {
+            emotionCounts[label] = (emotionCounts[label] ?? 0) + 1;
+          }
         }
       }
     }
