@@ -198,7 +198,7 @@ class EmotionAnalysisWidget extends StatelessWidget {
                   ],
                 ),
               );
-            }).toList(),
+            }),
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(12),
