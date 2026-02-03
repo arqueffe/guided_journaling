@@ -51,7 +51,7 @@ class NoteStorage {
       final prefs = await SharedPreferences.getInstance();
       final notesJson = prefs.getString(_notesKey);
 
-      if (notesJson == null) {
+      if (notesJson == null || notesJson.trim().isEmpty) {
         return [];
       }
 

@@ -5,26 +5,35 @@ import 'dart:io';
 import 'emotion_detector.dart';
 import 'note_storage.dart';
 import 'emotion_analysis_widget.dart';
+import 'title_generator.dart';
+import 'smollm2_service.dart';
+import 'questioning_agent.dart';
 
 // Global emotion detector instance
 final emotionDetector = EmotionDetector();
+// Global SmolLM2 service (shared by all agents)
+final smollm2Service = SmolLM2Service();
+// Global title generator instance
+late final TitleGenerator titleGenerator;
+// Global questioning agent instance
+late final QuestioningAgent questioningAgent;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Get temporary directory for both models
+  final tempDir = await getTemporaryDirectory();
+  print('Temp directory: ${tempDir.path}');
+
   // Initialize emotion detector
   try {
-    // Get temporary directory to copy vocab
-    final tempDir = await getTemporaryDirectory();
-    print('Temp directory: ${tempDir.path}');
-
     // Load model bytes directly from assets
-    final modelData = await rootBundle.load('assets/model.onnx');
+    final modelData = await rootBundle.load('assets/bert-emotion/model.onnx');
     final modelBytes = modelData.buffer.asUint8List();
     print('Model loaded: ${modelBytes.length} bytes');
 
     // Copy vocab from assets to temp directory (tokenizer needs file path)
-    final vocabData = await rootBundle.load('assets/vocab.txt');
+    final vocabData = await rootBundle.load('assets/bert-emotion/vocab.txt');
     final vocabPath = '${tempDir.path}${Platform.pathSeparator}vocab.txt';
     final vocabFile = File(vocabPath);
     await vocabFile.writeAsBytes(vocabData.buffer.asUint8List(), flush: true);
@@ -40,6 +49,37 @@ void main() async {
   } catch (e) {
     print('Failed to initialize emotion detector: $e');
   }
+
+  // Initialize SmolLM2 service (shared by all agents)
+  try {
+    final titleModelData = await rootBundle.load('assets/smollm2/model.onnx');
+    final titleModelBytes = titleModelData.buffer.asUint8List();
+    print('SmolLM2 model loaded: ${titleModelBytes.length} bytes');
+
+    // Copy tokenizer files to temp directory
+    final vocabJsonData = await rootBundle.load('assets/smollm2/vocab.json');
+    final vocabJsonPath = '${tempDir.path}${Platform.pathSeparator}vocab.json';
+    final vocabJsonFile = File(vocabJsonPath);
+    await vocabJsonFile.writeAsBytes(
+      vocabJsonData.buffer.asUint8List(),
+      flush: true,
+    );
+
+    final mergesData = await rootBundle.load('assets/smollm2/merges.txt');
+    final mergesPath = '${tempDir.path}${Platform.pathSeparator}merges.txt';
+    final mergesFile = File(mergesPath);
+    await mergesFile.writeAsBytes(mergesData.buffer.asUint8List(), flush: true);
+
+    await smollm2Service.initialize(titleModelBytes, vocabJsonPath, mergesPath);
+    print('SmolLM2 service initialized');
+  } catch (e) {
+    print('Failed to initialize SmolLM2 service: $e');
+  }
+
+  // Initialize agents that use the shared service (always initialize, even if service failed)
+  titleGenerator = TitleGenerator(smollm2Service);
+  questioningAgent = QuestioningAgent(smollm2Service);
+  print('Title generator and questioning agent initialized');
 
   runApp(const MyApp());
 }
@@ -93,12 +133,11 @@ class _MainScreenState extends State<MainScreen> {
       MaterialPageRoute(builder: (context) => const CreateNoteScreen()),
     );
 
-    if (result != null && result is Map<String, String>) {
-      // Analyze emotions if detector is initialized
-      List<Map<String, dynamic>>? emotions;
-      if (emotionDetector.isInitialized &&
-          result['content']!.trim().isNotEmpty) {
-        // Show loading dialog while analyzing emotions
+    if (result != null && result is String) {
+      final content = result;
+
+      // Show loading dialog for processing
+      if (mounted) {
         showDialog(
           context: context,
           barrierDismissible: false,
@@ -108,37 +147,53 @@ class _MainScreenState extends State<MainScreen> {
               children: [
                 CircularProgressIndicator(),
                 SizedBox(height: 16),
-                Text('Analyzing emotions...'),
+                Text('Processing note...'),
               ],
             ),
           ),
         );
+      }
 
+      // Generate title
+      String title = 'Untitled Note';
+      if (titleGenerator.isInitialized && content.trim().isNotEmpty) {
         try {
-          emotions = await emotionDetector.analyzeSentences(result['content']!);
+          title = await titleGenerator.generateTitle(content);
+          print('Generated title: $title');
+        } catch (e) {
+          print('Error generating title: $e');
+        }
+      }
+
+      // Analyze emotions if detector is initialized
+      List<Map<String, dynamic>>? emotions;
+      if (emotionDetector.isInitialized && content.trim().isNotEmpty) {
+        try {
+          emotions = await emotionDetector.analyzeSentences(content);
         } catch (e) {
           print('Error analyzing emotions: $e');
-        }
-
-        // Close loading dialog
-        if (mounted) {
-          Navigator.of(context).pop();
         }
       }
 
       final note = Note(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
-        title: result['title']!,
-        content: result['content']!,
+        title: title,
+        content: content,
         createdAt: DateTime.now(),
         emotionAnalysis: emotions,
       );
 
       if (mounted) {
         await _storage.addNote(note, _notes);
+
+        // Close loading dialog
+        Navigator.of(context).pop();
+
         setState(() {
-          // Notes already added in addNote method
+          // UI will update with the new note
         });
+
+        print('Note saved successfully. Total notes: ${_notes.length}');
       }
     }
   }
@@ -353,22 +408,96 @@ class CreateNoteScreen extends StatefulWidget {
 }
 
 class _CreateNoteScreenState extends State<CreateNoteScreen> {
-  final TextEditingController _titleController = TextEditingController();
   final TextEditingController _contentController = TextEditingController();
+  bool _isLoadingQuestion = false;
 
   @override
   void dispose() {
-    _titleController.dispose();
     _contentController.dispose();
     super.dispose();
   }
 
   void _saveNote() {
-    if (_titleController.text.trim().isNotEmpty) {
-      Navigator.pop(context, {
-        'title': _titleController.text.trim(),
-        'content': _contentController.text.trim(),
-      });
+    if (_contentController.text.trim().isNotEmpty) {
+      Navigator.pop(context, _contentController.text.trim());
+    }
+  }
+
+  Future<void> _askQuestion() async {
+    if (_contentController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Write something first before asking for a question!'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    if (!questioningAgent.isInitialized) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Questioning agent is not initialized yet'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoadingQuestion = true;
+    });
+
+    try {
+      print('Attempting to generate question...');
+      final question = await questioningAgent.generateQuestion(
+        _contentController.text,
+      );
+      print('Question generated successfully: $question');
+
+      if (mounted) {
+        setState(() {
+          _isLoadingQuestion = false;
+        });
+
+        // Show the question in a dialog
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.lightbulb_outline, color: Colors.amber),
+                SizedBox(width: 8),
+                Text('Reflection Question'),
+              ],
+            ),
+            content: Text(question, style: const TextStyle(fontSize: 16)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Dismiss'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e, stackTrace) {
+      print('Error generating question: $e');
+      print('Stack trace: $stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _isLoadingQuestion = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.toString()}'),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(label: 'Dismiss', onPressed: () {}),
+          ),
+        );
+      }
     }
   }
 
@@ -391,24 +520,16 @@ class _CreateNoteScreenState extends State<CreateNoteScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TextField(
-              controller: _titleController,
-              autofocus: true,
-              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              decoration: const InputDecoration(
-                hintText: 'Note title',
-                border: InputBorder.none,
-              ),
-            ),
-            const Divider(),
             Expanded(
               child: TextField(
                 controller: _contentController,
+                autofocus: true,
                 maxLines: null,
                 expands: true,
                 textAlignVertical: TextAlignVertical.top,
                 decoration: const InputDecoration(
-                  hintText: 'Write your note here...',
+                  hintText:
+                      'Write your note here...\n\n(Title will be generated automatically)',
                   border: InputBorder.none,
                 ),
               ),
@@ -416,6 +537,24 @@ class _CreateNoteScreenState extends State<CreateNoteScreen> {
           ],
         ),
       ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _isLoadingQuestion ? null : _askQuestion,
+        tooltip: 'Get a reflection question',
+        backgroundColor: _isLoadingQuestion
+            ? Colors.grey
+            : Theme.of(context).colorScheme.secondary,
+        child: _isLoadingQuestion
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  color: Colors.white,
+                  strokeWidth: 2,
+                ),
+              )
+            : const Icon(Icons.psychology),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 }
@@ -501,7 +640,6 @@ class ViewNoteScreen extends StatelessWidget {
 
                     // Check if confidence is below 60%
                     final isLowConfidence = score < 0.6;
-                    final displayLabel = isLowConfidence ? 'Unknown' : label;
                     final displayColor = isLowConfidence
                         ? Colors.grey.shade400
                         : _getEmotionColor(label);
